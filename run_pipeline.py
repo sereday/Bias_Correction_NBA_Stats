@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src import config as cfg
-from src.stages import import_stage
+from src.stages import discover_stage, import_stage
 
 
 def main():
@@ -17,7 +17,9 @@ def main():
         print(f"Stage: {stage}")
         print("=" * 50)
 
-        if stage == "import":
+        if stage == "discover":
+            discover_stage.run(job, output_dir)
+        elif stage == "import":
             import_stage.run(job, output_dir)
         elif stage == "clean":
             print("  (not yet implemented)")
