@@ -100,7 +100,7 @@ def run(config, output_dir):
         for league in leagues:
             league_start = _LEAGUE_START.get(league, season_end_min)
             league_end = _LEAGUE_END.get(league, season_end_max)
-            for season_end in range(max(season_end_min, league_start), min(season_end_max, league_end) + 1):
+            for season_end in reversed(range(max(season_end_min, league_start), min(season_end_max, league_end) + 1)):
                 if (league, season_end) in completed_seasons:
                     print(f"    skip: {league} {season_end}")
                     continue

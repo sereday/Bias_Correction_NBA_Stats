@@ -8,5 +8,6 @@
   "output_dir": "./data/raw",
   "output_filename": "sample_box_scores.csv",
   "stages": ["discover", "import", "clean", "model", "results"],
-  "active_stages": ["discover"]
+  "game_type": "playoff",
+  "active_stages": ["import"]
 }

@@ -36,7 +36,7 @@ DNP_STRINGS = {
 # Fixed output schema — ensures append-mode CSV columns are always aligned.
 # OT columns will be NaN for regulation games.
 _META_COLS = [
-    "game_id", "url", "date", "league", "season_end",
+    "game_id", "url", "date", "league", "season_end", "is_playoff",
     "away_team", "home_team", "away_score", "home_score",
     "attendance", "attendance_source", "ocr_confidence",
     "team", "is_home", "player_id", "player_name", "is_team_total", "reason",
@@ -97,7 +97,7 @@ def _attendance_from_html(soup):
     return None
 
 
-def _attendance_from_scan(game_id, page):
+def _attendance_from_scan(game_id, page, save_path=None):
     """Download the boxscore scan and OCR it for attendance.
 
     Returns (value: int|None, confidence: float|None).
@@ -113,7 +113,10 @@ def _attendance_from_scan(game_id, page):
         response = page.context.request.fetch(scan_url, timeout=15000)
         if not response.ok:
             return None, None
-        img = Image.open(io.BytesIO(response.body())).convert("L")  # greyscale
+        raw_bytes = response.body()
+        if save_path is not None:
+            save_path.write_bytes(raw_bytes)
+        img = Image.open(io.BytesIO(raw_bytes)).convert("L")  # greyscale
     except Exception:
         return None, None
 
@@ -266,9 +269,13 @@ def _parse_box_table(table, game_meta, line_scores):
     return rows
 
 
-def _fetch_box_score(page, url, page_delay):
-    soup = _parse_html(_fetch_html(page, url, page_delay))
+def _fetch_box_score(page, url, page_delay, games_dir=None):
+    raw_html = _fetch_html(page, url, page_delay)
+    soup = _parse_html(raw_html)
     game_id = url.split("/boxscores/")[-1].replace(".html", "")
+
+    if games_dir is not None:
+        (games_dir / f"{game_id}.html").write_text(raw_html, encoding="utf-8")
 
     scores = [d.text.strip() for d in soup.select("div.scorebox div.score")]
     basic_tables = soup.find_all("table", id=re.compile(r"box-.+-game-basic"))
@@ -283,7 +290,8 @@ def _fetch_box_score(page, url, page_delay):
     if attendance is not None:
         att_source, ocr_conf = "html", None
     else:
-        attendance, ocr_conf = _attendance_from_scan(game_id, page)
+        img_path = (games_dir / f"{game_id}.jpg") if games_dir is not None else None
+        attendance, ocr_conf = _attendance_from_scan(game_id, page, save_path=img_path)
         att_source = "ocr" if attendance is not None else None
 
     game_meta = {
@@ -312,22 +320,33 @@ def _fetch_box_score(page, url, page_delay):
 
 def run(config, output_dir):
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    games_dir = output_dir / "games"
+    games_dir.mkdir(parents=True, exist_ok=True)
 
-    samples = config.get("sample_games", [])
-    max_per = config.get("max_games_per_sample", 3)
     page_delay = float(config.get("page_delay_s", 4.0))
-    out_filename = config.get("output_filename", "sample_box_scores.csv")
-    out_path = output_dir / out_filename
 
-    # Checkpointing: skip games already written to the output CSV
-    completed_ids: set = set()
-    if out_path.exists():
-        try:
-            completed_ids = set(pd.read_csv(out_path, usecols=["game_id"])["game_id"])
-            print(f"  Resuming — {len(completed_ids)} games already on disk, skipping.")
-        except Exception:
-            pass
+    # Load game URLs produced by discover stage
+    urls_path = output_dir / "game_urls.csv"
+    if not urls_path.exists():
+        print(f"  ERROR: {urls_path} not found. Run discover stage first.")
+        return
+
+    urls_df = pd.read_csv(urls_path)
+
+    # Filter by game_type: "playoff", "regular", or "all"
+    game_type = config.get("game_type", "all")
+    if game_type == "playoff":
+        urls_df = urls_df[urls_df["is_playoff"] == True]
+    elif game_type == "regular":
+        urls_df = urls_df[urls_df["is_playoff"] == False]
+
+    filtered_df = urls_df.sort_values("season_end", ascending=False).reset_index(drop=True)
+
+    # Checkpointing: a game is done if its individual file already exists
+    completed_ids = {p.stem for p in games_dir.glob("*.csv")}
+    remaining = len(filtered_df) - len(filtered_df[filtered_df["game_id"].isin(completed_ids)])
+    print(f"  {len(filtered_df)} {game_type} games across {filtered_df['season_end'].nunique()} seasons "
+          f"({len(completed_ids)} done, {remaining} remaining)")
 
     _UA = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -343,61 +362,50 @@ def run(config, output_dir):
         )
         page = context.new_page()
 
-        for s in samples:
-            league = s["league"]
-            season_end = s["season_end"]
-            month = s["month"]
-            label = f"{league} {season_end - 1}-{str(season_end)[-2:]} ({month})"
-            print(f"\n  [{label}]")
+        for _, game_row in filtered_df.iterrows():
+            game_id = game_row["game_id"]
+            url = game_row["url"]
+            league = game_row["league"]
+            season_end = game_row["season_end"]
+            game_path = games_dir / f"{game_id}.csv"
 
-            try:
-                urls = _schedule_game_urls(page, league, season_end, month, max_per, page_delay)
-            except Exception as e:
-                print(f"    ERROR fetching schedule: {e}")
+            if game_id in completed_ids:
+                print(f"    skip (done): {game_id}")
                 continue
 
-            for url in urls:
-                game_id = url.split("/boxscores/")[-1].replace(".html", "")
-                if game_id in completed_ids:
-                    print(f"    skip (done): {game_id}")
+            print(f"    {league} {season_end} {game_type}: {url}")
+            try:
+                rows = _fetch_box_score(page, url, page_delay, games_dir=games_dir)
+                if not rows:
                     continue
-
-                print(f"    box score: {url}")
-                try:
-                    rows = _fetch_box_score(page, url, page_delay)
-                    if not rows:
-                        continue
-                    for r in rows:
-                        r["league"] = league
-                        r["season_end"] = season_end
-                    game_df = pd.DataFrame(rows)
-                    game_df["mp"] = game_df["mp"].apply(_convert_mp)
-                    # Reindex to fixed schema so append-mode CSV columns always align
-                    game_df = game_df.reindex(columns=OUTPUT_COLS)
-                    for attempt in range(5):
-                        try:
-                            game_df.to_csv(out_path, mode="a", header=not out_path.exists(), index=False)
-                            break
-                        except PermissionError:
-                            if attempt == 4:
-                                raise
-                            time.sleep(2)
-                    completed_ids.add(game_id)
-                    att = rows[0].get("attendance")
-                    src = rows[0].get("attendance_source")
-                    conf = rows[0].get("ocr_confidence")
-                    att_str = f"att={att}({src}" + (f",conf={conf:.2f})" if conf else ")") if att else "att=None"
-                    print(f"      -> {len(rows)} rows  {att_str}")
-                except Exception as e:
-                    print(f"      ERROR: {e}")
+                for r in rows:
+                    r["league"] = league
+                    r["season_end"] = season_end
+                    r["is_playoff"] = game_row["is_playoff"]
+                game_df = pd.DataFrame(rows)
+                game_df["mp"] = game_df["mp"].apply(_convert_mp)
+                game_df = game_df.reindex(columns=OUTPUT_COLS)
+                for attempt in range(5):
+                    try:
+                        game_df.to_csv(game_path, index=False)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(2)
+                completed_ids.add(game_id)
+                att = rows[0].get("attendance")
+                src = rows[0].get("attendance_source")
+                conf = rows[0].get("ocr_confidence")
+                att_str = f"att={att}({src}" + (f",conf={conf:.2f})" if conf else ")") if att else "att=None"
+                print(f"      -> {len(rows)} rows  {att_str}")
+            except Exception as e:
+                print(f"      ERROR: {e}")
 
         browser.close()
 
-    if out_path.exists():
-        n = sum(1 for _ in open(out_path)) - 1
-        print(f"\n  {n} total rows in {out_path}")
-    else:
-        print("\n  No data collected.")
+    total = len(list(games_dir.glob("*.csv")))
+    print(f"\n  {total} game files in {games_dir}")
 
 
 def _schedule_game_urls(page, league, season_end, month, max_games, page_delay):
