@@ -1,0 +1,17 @@
+{
+  "leagues": ["BAA", "NBA", "ABA"],
+  "season_end_min": 1947,
+  "season_end_max": 1974,
+  "sample_mode": true,
+  "sample_games": [
+    {"league": "BAA", "season_end": 1947, "month": "november"},
+    {"league": "NBA", "season_end": 1955, "month": "november"},
+    {"league": "NBA", "season_end": 1965, "month": "november"},
+    {"league": "ABA", "season_end": 1969, "month": "november"},
+    {"league": "NBA", "season_end": 1973, "month": "november"}
+  ],
+  "max_games_per_sample": 3,
+  "output_dir": "./data/raw",
+  "stages": ["import", "clean", "model", "results"],
+  "active_stages": ["import"]
+}
